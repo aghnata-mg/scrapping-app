@@ -52,8 +52,16 @@ public sealed class CrawlerBackgroundService(
 
         try
         {
+            var locationId = configuration["Crawler:DefaultLocationId"];
+            if (string.IsNullOrWhiteSpace(locationId))
+            {
+                logger.LogDebug(
+                    "Skipping scheduled crawl — Crawler:DefaultLocationId not configured.");
+                return;
+            }
+
             var result = await crawlerService.SearchAsync(
-                new SearchRequestDto(Page: 1, PageSize: 50));
+                new SearchRequestDto(LocationId: locationId, Page: 1, PageSize: 50));
 
             logger.LogInformation(
                 "Scheduled crawl complete — {Total} total listings found", result.TotalCount);

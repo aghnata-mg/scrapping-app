@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.Json;
 using AngleSharp;
 using AngleSharp.Html.Dom;
 using Microsoft.Playwright;
@@ -120,7 +122,12 @@ public sealed class CrawlerService(
             throw new InvalidOperationException(
                 "No active session. Call POST /api/crawler/login first.");
 
-        sessionManager.SetStatus(CrawlerSessionStatus.Running, "Scraping listings…");
+        if (string.IsNullOrWhiteSpace(request.LocationId))
+            throw new InvalidOperationException(
+                "LocationId is required. Provide the ikwilhuren.nu location identifier, " +
+                "e.g. \"wpl-a59063a2f1466c7f0dce9e0f0420e477\".");
+
+        sessionManager.SetStatus(CrawlerSessionStatus.Running, "Fetching listings…");
 
         try
         {
@@ -129,51 +136,62 @@ public sealed class CrawlerService(
 
             try
             {
-                var searchUrl = BuildSearchUrl(request);
-                await page.GotoAsync(searchUrl, new PageGotoOptions
+                // Navigate to the listing page first so the fetch has the correct origin + cookies
+                await page.GotoAsync("https://ikwilhuren.nu/aanbod/", new PageGotoOptions
                 {
-                    Timeout = DefaultTimeoutMs,
-                    WaitUntil = WaitUntilState.DOMContentLoaded
+                    WaitUntil = WaitUntilState.DOMContentLoaded,
+                    Timeout = DefaultTimeoutMs
                 });
 
-                await ApplyPageFiltersAsync(page, request);
-
-                List<Listing> listings;
-                try
+                // Build application/x-www-form-urlencoded body
+                var formParts = new List<string>
                 {
-                    // Wait for at least one listing container
-                    await page.WaitForSelectorAsync(
-                        ListingContainerSelector,
-                        new PageWaitForSelectorOptions
-                        {
-                            Timeout = DefaultTimeoutMs,
-                            State = WaitForSelectorState.Attached
+                    $"locatieid={Uri.EscapeDataString(request.LocationId)}"
+                };
+                if (request.MinPrice.HasValue)
+                    formParts.Add($"huurprijs_van={request.MinPrice.Value.ToString(CultureInfo.InvariantCulture)}");
+                if (request.MaxPrice.HasValue)
+                    formParts.Add($"huurprijs_tot={request.MaxPrice.Value.ToString(CultureInfo.InvariantCulture)}");
+                if (request.Bedrooms.HasValue)
+                    formParts.Add($"slaapkamers={request.Bedrooms.Value}");
+                formParts.Add($"pagina={request.Page}");
+
+                var formBody = string.Join("&", formParts);
+
+                // Run the POST from within the page — cookies are included automatically
+                var jsonText = await page.EvaluateAsync<string>(
+                    """
+                    async ([url, body]) => {
+                        const res = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: body
                         });
+                        return await res.text();
+                    }
+                    """,
+                    new[] { "https://ikwilhuren.nu/aanbod/geo/adres/", formBody });
 
-                    var html = await page.ContentAsync();
-                    listings = await ParseListingsFromHtmlAsync(html);
-                }
-                catch (TimeoutException)
-                {
-                    logger.LogInformation("No listing containers found for current search filters.");
-                    listings = [];
-                }
+                if (string.IsNullOrWhiteSpace(jsonText))
+                    throw new InvalidOperationException("Search API returned an empty response.");
 
+                logger.LogDebug("Search API raw response ({Len} chars): {Preview}",
+                    jsonText.Length, jsonText[..Math.Min(500, jsonText.Length)]);
+
+                var listings = ParseApiListings(jsonText);
                 await listingService.SaveListingsAsync(listings);
 
-                var page_ = request.Page;
-                var pageSize = request.PageSize;
                 var paged = listings
-                    .Skip((page_ - 1) * pageSize)
-                    .Take(pageSize)
+                    .Skip((request.Page - 1) * request.PageSize)
+                    .Take(request.PageSize)
                     .Select(ToDto)
                     .ToList();
 
                 sessionManager.SetStatus(
                     CrawlerSessionStatus.LoggedIn,
-                    $"Scraped {listings.Count} listings");
+                    $"Found {listings.Count} listings");
 
-                return new PagedResult<ListingDto>(paged, listings.Count, page_, pageSize);
+                return new PagedResult<ListingDto>(paged, listings.Count, request.Page, request.PageSize);
             }
             finally
             {
@@ -182,8 +200,8 @@ public sealed class CrawlerService(
         }
         catch (TimeoutException ex)
         {
-            sessionManager.SetStatus(CrawlerSessionStatus.Failed, "Timed out while scraping.");
-            logger.LogError(ex, "Timeout during search");
+            sessionManager.SetStatus(CrawlerSessionStatus.Failed, "Timed out while fetching listings.");
+            logger.LogError(ex, "Timeout during search API call");
             throw;
         }
         catch (PlaywrightException ex)
@@ -206,7 +224,7 @@ public sealed class CrawlerService(
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    // Common selector tried in order — site-specific ones take priority
+    // CSS selectors retained for the HTML fallback parser (ParseListingsFromHtmlAsync)
     private const string ListingContainerSelector =
         ".object-list .object, .woning-card, article, " +
         "[class*='woning'], [class*='property'], [class*='listing']";
@@ -280,46 +298,101 @@ public sealed class CrawlerService(
             pageContent.Contains(phrase, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>
-    /// Builds an ikwilhuren.nu search URL using the authenticated session origin.
-    /// </summary>
-    private string BuildSearchUrl(SearchRequestDto req)
+    // ── API response parser ───────────────────────────────────────────────────
+
+    private List<Listing> ParseApiListings(string jsonText)
     {
-        if (string.IsNullOrWhiteSpace(sessionManager.BaseUrl))
-            throw new InvalidOperationException(
-                "BuildSearchUrl requires an authenticated session base URL. Ensure POST /api/crawler/login succeeds before searching.");
+        var listings = new List<Listing>();
+        var now = DateTime.UtcNow;
 
-        var searchUri = new Uri(new Uri(sessionManager.BaseUrl), "/huurwoningen");
-        var qs = new List<string>();
+        try
+        {
+            using var doc = JsonDocument.Parse(jsonText);
+            var root = doc.RootElement;
 
-        if (!string.IsNullOrWhiteSpace(req.City))
-            qs.Add($"plaats={Uri.EscapeDataString(req.City)}");
-        if (req.MinPrice.HasValue) qs.Add($"huurprijs_van={req.MinPrice.Value}");
-        if (req.MaxPrice.HasValue) qs.Add($"huurprijs_tot={req.MaxPrice.Value}");
-        if (req.Bedrooms.HasValue) qs.Add($"slaapkamers={req.Bedrooms.Value}");
-        qs.Add($"pagina={req.Page}");
+            // Response may be a root array or an object wrapping one
+            IEnumerable<JsonElement> items;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                items = root.EnumerateArray().ToList();
+            }
+            else if (root.ValueKind == JsonValueKind.Object)
+            {
+                string[] wrapperKeys = ["results", "items", "aanbod", "woningen", "data", "objects"];
+                JsonElement inner = default;
+                foreach (var key in wrapperKeys)
+                    if (root.TryGetProperty(key, out inner) && inner.ValueKind == JsonValueKind.Array)
+                        break;
 
-        var builder = new UriBuilder(searchUri) { Query = string.Join("&", qs) };
-        return builder.Uri.ToString();
+                items = inner.ValueKind == JsonValueKind.Array
+                    ? inner.EnumerateArray().ToList()
+                    : [];
+            }
+            else
+            {
+                logger.LogWarning("Unexpected API response root type: {Kind}", root.ValueKind);
+                return listings;
+            }
+
+            foreach (var el in items)
+            {
+                try
+                {
+                    listings.Add(new Listing
+                    {
+                        Title       = JStr(el, "straat", "adres", "title", "naam") ?? "Unknown",
+                        Price       = JDecimal(el, "huurprijs", "prijs", "price"),
+                        Location    = JStr(el, "woonplaats", "plaats", "location", "city") ?? string.Empty,
+                        Bedrooms    = JInt(el, "slaapkamers", "kamers", "bedrooms"),
+                        PropertyType = JStr(el, "soort", "type", "woningtype", "propertyType") ?? "Unknown",
+                        ListingUrl  = JStr(el, "url", "detailUrl", "href", "link") ?? string.Empty,
+                        ThumbnailUrl = JStr(el, "foto", "image", "thumbnail", "afbeelding"),
+                        ScrapedAt   = now
+                    });
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex, "Skipping unparseable listing element");
+                }
+            }
+        }
+        catch (JsonException ex)
+        {
+            logger.LogError(ex, "Failed to parse search API JSON response");
+        }
+
+        logger.LogInformation("Parsed {Count} listings from API response", listings.Count);
+        return listings;
     }
 
-    private static async Task ApplyPageFiltersAsync(IPage page, SearchRequestDto req)
+    private static string? JStr(JsonElement el, params string[] keys)
     {
-        if (req.MinPrice.HasValue)
-        {
-            var el = await page.QuerySelectorAsync(
-                "input[name='min_price'], input[id='min-price'], #minPrice");
-            if (el is not null)
-                await el.FillAsync(req.MinPrice.Value.ToString());
-        }
+        foreach (var k in keys)
+            if (el.TryGetProperty(k, out var p) && p.ValueKind == JsonValueKind.String)
+                return p.GetString();
+        return null;
+    }
 
-        if (req.MaxPrice.HasValue)
+    private static decimal JDecimal(JsonElement el, params string[] keys)
+    {
+        foreach (var k in keys)
         {
-            var el = await page.QuerySelectorAsync(
-                "input[name='max_price'], input[id='max-price'], #maxPrice");
-            if (el is not null)
-                await el.FillAsync(req.MaxPrice.Value.ToString());
+            if (!el.TryGetProperty(k, out var p)) continue;
+            if (p.ValueKind == JsonValueKind.Number && p.TryGetDecimal(out var d)) return d;
+            if (p.ValueKind == JsonValueKind.String) return ParseDecimalFromText(p.GetString() ?? "0");
         }
+        return 0m;
+    }
+
+    private static int? JInt(JsonElement el, params string[] keys)
+    {
+        foreach (var k in keys)
+        {
+            if (!el.TryGetProperty(k, out var p)) continue;
+            if (p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var i)) return i;
+            if (p.ValueKind == JsonValueKind.String && int.TryParse(p.GetString(), out var si)) return si;
+        }
+        return null;
     }
 
     // ── HTML parsing (AngleSharp fallback) ────────────────────────────────────

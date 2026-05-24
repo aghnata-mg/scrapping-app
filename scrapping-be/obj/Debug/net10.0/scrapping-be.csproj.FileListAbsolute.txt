@@ -492,3 +492,5 @@ D:\Frlnc\scrapping-app\scrapping-be\obj\Debug\net10.0\refint\scrapping-be.dll
 D:\Frlnc\scrapping-app\scrapping-be\obj\Debug\net10.0\scrapping-be.pdb
 D:\Frlnc\scrapping-app\scrapping-be\obj\Debug\net10.0\scrapping-be.genruntimeconfig.cache
 D:\Frlnc\scrapping-app\scrapping-be\obj\Debug\net10.0\ref\scrapping-be.dll
+D:\Frlnc\scrapping-app\scrapping-be\bin\Debug\net10.0\session_cookies.json
+D:\Frlnc\scrapping-app\scrapping-be\obj\Debug\net10.0\scrapping-be.sourcelink.json

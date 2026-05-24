@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("scrapping-be")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+083caec1ed61e5307005abbaec3afad3b4e56d46")]
 [assembly: System.Reflection.AssemblyProductAttribute("scrapping-be")]
 [assembly: System.Reflection.AssemblyTitleAttribute("scrapping-be")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
