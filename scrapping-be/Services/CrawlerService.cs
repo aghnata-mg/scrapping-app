@@ -155,7 +155,7 @@ public sealed class CrawlerService(
                 }
                 catch (TimeoutException)
                 {
-                    logger.LogInformation("No listing containers found for URL {Url}", searchUrl);
+                    logger.LogInformation("No listing containers found for current search filters.");
                     listings = [];
                 }
 
@@ -208,7 +208,7 @@ public sealed class CrawlerService(
 
     // Common selector tried in order — site-specific ones take priority
     private const string ListingContainerSelector =
-        ".object-list .object, .woning-card, article, .object, " +
+        ".object-list .object, .woning-card, article, " +
         "[class*='woning'], [class*='property'], [class*='listing']";
 
     private static async Task FillLoginFormAsync(IPage page, string username, string password)
@@ -331,7 +331,7 @@ public sealed class CrawlerService(
         var document = await browsingContext.OpenAsync(req => req.Content(html));
 
         var containers = document.QuerySelectorAll(
-            ".object-list .object, .woning-card, article, .object, " +
+            ".object-list .object, .woning-card, article, " +
             "[class*='woning'], [class*='property'], [class*='listing']");
 
         var now = DateTime.UtcNow;
