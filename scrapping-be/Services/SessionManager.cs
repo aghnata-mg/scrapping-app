@@ -28,6 +28,7 @@ public sealed class SessionManager(
 
     public CrawlerSessionStatus Status => _status;
     public string? StatusMessage => _statusMessage;
+    public string? BaseUrl { get; set; }
 
     public void SetStatus(CrawlerSessionStatus status, string? message = null)
     {
@@ -152,6 +153,7 @@ public sealed class SessionManager(
 
             _status = CrawlerSessionStatus.Idle;
             _statusMessage = null;
+            BaseUrl = null;
             logger.LogInformation("Browser session cleared");
         }
         finally
