@@ -84,6 +84,7 @@ public sealed class CrawlerService(
                 }
 
                 await sessionManager.PersistCookiesAsync();
+                sessionManager.BaseUrl = new Uri(request.LoginUrl).GetLeftPart(UriPartial.Authority);
                 sessionManager.SetStatus(CrawlerSessionStatus.LoggedIn, "Authenticated");
                 logger.LogInformation("Logged in to {Url}", request.LoginUrl);
                 return true;
@@ -137,17 +138,26 @@ public sealed class CrawlerService(
 
                 await ApplyPageFiltersAsync(page, request);
 
-                // Wait for at least one listing container
-                await page.WaitForSelectorAsync(
-                    ListingContainerSelector,
-                    new PageWaitForSelectorOptions
-                    {
-                        Timeout = DefaultTimeoutMs,
-                        State = WaitForSelectorState.Attached
-                    });
+                List<Listing> listings;
+                try
+                {
+                    // Wait for at least one listing container
+                    await page.WaitForSelectorAsync(
+                        ListingContainerSelector,
+                        new PageWaitForSelectorOptions
+                        {
+                            Timeout = DefaultTimeoutMs,
+                            State = WaitForSelectorState.Attached
+                        });
 
-                var html = await page.ContentAsync();
-                var listings = await ParseListingsFromHtmlAsync(html);
+                    var html = await page.ContentAsync();
+                    listings = await ParseListingsFromHtmlAsync(html);
+                }
+                catch (TimeoutException)
+                {
+                    logger.LogInformation("No listing containers found for current search filters.");
+                    listings = [];
+                }
 
                 await listingService.SaveListingsAsync(listings);
 
@@ -198,8 +208,8 @@ public sealed class CrawlerService(
 
     // Common selector tried in order — site-specific ones take priority
     private const string ListingContainerSelector =
-        "[data-listing], .listing-item, article.property, .property-card, " +
-        ".rental-listing, li.result, .search-result";
+        ".object-list .object, .woning-card, article, " +
+        "[class*='woning'], [class*='property'], [class*='listing']";
 
     private static async Task FillLoginFormAsync(IPage page, string username, string password)
     {
@@ -271,25 +281,26 @@ public sealed class CrawlerService(
     }
 
     /// <summary>
-    /// Builds a generic search URL. In a real integration this would be
-    /// site-specific; swap this method for the actual target URL pattern.
+    /// Builds an ikwilhuren.nu search URL using the authenticated session origin.
     /// </summary>
-    private static string BuildSearchUrl(SearchRequestDto req)
+    private string BuildSearchUrl(SearchRequestDto req)
     {
+        if (string.IsNullOrWhiteSpace(sessionManager.BaseUrl))
+            throw new InvalidOperationException(
+                "BuildSearchUrl requires an authenticated session base URL. Ensure POST /api/crawler/login succeeds before searching.");
+
+        var searchUri = new Uri(new Uri(sessionManager.BaseUrl), "/huurwoningen");
         var qs = new List<string>();
 
         if (!string.IsNullOrWhiteSpace(req.City))
-            qs.Add($"city={Uri.EscapeDataString(req.City)}");
-        if (req.MinPrice.HasValue) qs.Add($"price_min={req.MinPrice}");
-        if (req.MaxPrice.HasValue) qs.Add($"price_max={req.MaxPrice}");
-        if (req.Bedrooms.HasValue) qs.Add($"bedrooms={req.Bedrooms}");
-        if (!string.IsNullOrWhiteSpace(req.PropertyType))
-            qs.Add($"type={Uri.EscapeDataString(req.PropertyType)}");
-        if (req.AvailableFrom.HasValue)
-            qs.Add($"available_from={req.AvailableFrom.Value:yyyy-MM-dd}");
-        qs.Add($"page={req.Page}");
+            qs.Add($"plaats={Uri.EscapeDataString(req.City)}");
+        if (req.MinPrice.HasValue) qs.Add($"huurprijs_van={req.MinPrice.Value}");
+        if (req.MaxPrice.HasValue) qs.Add($"huurprijs_tot={req.MaxPrice.Value}");
+        if (req.Bedrooms.HasValue) qs.Add($"slaapkamers={req.Bedrooms.Value}");
+        qs.Add($"pagina={req.Page}");
 
-        return "/search?" + string.Join("&", qs);
+        var builder = new UriBuilder(searchUri) { Query = string.Join("&", qs) };
+        return builder.Uri.ToString();
     }
 
     private static async Task ApplyPageFiltersAsync(IPage page, SearchRequestDto req)
@@ -319,9 +330,7 @@ public sealed class CrawlerService(
         var browsingContext = BrowsingContext.New(config);
         var document = await browsingContext.OpenAsync(req => req.Content(html));
 
-        var containers = document.QuerySelectorAll(
-            "[data-listing], .listing-item, article.property, .property-card, " +
-            ".rental-listing, li.result, .search-result");
+        var containers = document.QuerySelectorAll(ListingContainerSelector);
 
         var now = DateTime.UtcNow;
         var listings = new List<Listing>();
@@ -331,21 +340,21 @@ public sealed class CrawlerService(
             try
             {
                 var title =
-                    el.QuerySelector(".title, h2, h3, [data-testid='title']")?.TextContent?.Trim()
+                    el.QuerySelector(".object-title, .title, h2, h3, [data-testid='title']")?.TextContent?.Trim()
                     ?? el.QuerySelector("a")?.TextContent?.Trim()
                     ?? "Unknown";
 
                 var priceText =
-                    el.QuerySelector(".price, [data-testid='price'], .rent, .amount")?.TextContent?.Trim()
+                    el.QuerySelector(".object-price, .price, [data-testid='price'], .rent, .amount")?.TextContent?.Trim()
                     ?? "0";
                 var price = ParseDecimalFromText(priceText);
 
                 var location =
-                    el.QuerySelector(".location, address, [data-testid='location'], .area")?.TextContent?.Trim()
+                    el.QuerySelector(".object-location, .location, address, [data-testid='location'], .area")?.TextContent?.Trim()
                     ?? string.Empty;
 
                 var bedroomsText =
-                    el.QuerySelector(".bedrooms, [data-testid='bedrooms'], .rooms")?.TextContent?.Trim();
+                    el.QuerySelector(".object-bedrooms, .bedrooms, [data-testid='bedrooms'], .rooms, [class*='slaapkamer']")?.TextContent?.Trim();
                 int? bedrooms = null;
                 if (bedroomsText is not null)
                 {
@@ -354,7 +363,7 @@ public sealed class CrawlerService(
                 }
 
                 var propertyType =
-                    el.QuerySelector(".property-type, [data-testid='type'], .type-label")?.TextContent?.Trim()
+                    el.QuerySelector(".object-type, .property-type, [data-testid='type'], .type-label")?.TextContent?.Trim()
                     ?? "Unknown";
 
                 var linkEl = el.QuerySelector("a[href]") as IHtmlAnchorElement;
