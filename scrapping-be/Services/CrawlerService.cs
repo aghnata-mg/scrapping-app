@@ -287,7 +287,7 @@ public sealed class CrawlerService(
     {
         if (string.IsNullOrWhiteSpace(sessionManager.BaseUrl))
             throw new InvalidOperationException(
-                "Missing session base URL. Call POST /api/crawler/login first.");
+                "BuildSearchUrl requires an authenticated session base URL. Ensure POST /api/crawler/login succeeds before searching.");
 
         var searchUri = new Uri(new Uri(sessionManager.BaseUrl), "/huurwoningen");
         var qs = new List<string>();
@@ -330,9 +330,7 @@ public sealed class CrawlerService(
         var browsingContext = BrowsingContext.New(config);
         var document = await browsingContext.OpenAsync(req => req.Content(html));
 
-        var containers = document.QuerySelectorAll(
-            ".object-list .object, .woning-card, article, " +
-            "[class*='woning'], [class*='property'], [class*='listing']");
+        var containers = document.QuerySelectorAll(ListingContainerSelector);
 
         var now = DateTime.UtcNow;
         var listings = new List<Listing>();
