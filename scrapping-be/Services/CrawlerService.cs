@@ -154,6 +154,10 @@ public sealed class CrawlerService(
                     formParts.Add($"huurprijs_tot={request.MaxPrice.Value.ToString(CultureInfo.InvariantCulture)}");
                 if (request.Bedrooms.HasValue)
                     formParts.Add($"slaapkamers={request.Bedrooms.Value}");
+                if (!string.IsNullOrWhiteSpace(request.Adres))
+                    formParts.Add($"selAdres={Uri.EscapeDataString(request.Adres)}");
+                if (request.Afstand.HasValue)
+                    formParts.Add($"selAfstand={request.Afstand.Value}");
                 formParts.Add($"pagina={request.Page}");
 
                 var formBody = string.Join("&", formParts);

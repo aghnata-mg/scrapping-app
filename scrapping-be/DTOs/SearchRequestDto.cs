@@ -10,6 +10,8 @@ public sealed record SearchRequestDto(
     decimal? MinPrice = null,
     decimal? MaxPrice = null,
     int? Bedrooms = null,
+    string? Adres = null,
+    int? Afstand = null,
     string? PropertyType = null,
     DateOnly? AvailableFrom = null,
     int Page = 1,
